@@ -1,0 +1,373 @@
+
+```{r}
+### Zhaoyang Xu, November 2022, "Some properties of the maximum likelihood estimator of a particular state-space model and derivation of the EM algorithm"
+```
+
+
+```{r}
+library(matlib)
+```
+
+
+```{r}
+## define fixed parameters
+K <- 3
+
+epsilon_filtering_equal <- 1e-6
+epsilon_second_calculate <- 1e-6
+
+mu <- 0
+my_sigma <- 1
+n <- 250  # same as T used in the paper
+num_Y <- 1
+num_iteration_max <- 1000
+```
+
+```{r}
+## read input
+true_rho <- as.matrix(read.csv(file = 'K=3_n=1_true_rho.csv')$x) 
+true_w <- as.matrix(read.csv(file = 'K=3_n=1_true_w.csv')$x)      # true parameter w
+all_Y <- as.matrix(read.csv(file = 'K=3_n=1_Y.csv')[c(2:251)])    # observation
+```
+
+
+```{r}
+## read output
+#em_q <- as.matrix(read.csv(file = 'em_q.csv')[c(2:4)])
+#newton_q <- as.matrix(read.csv(file = 'newton_q.csv')[c(2:4)])
+#em_logL <- as.matrix(read.csv(file = 'em_logL.csv')[c(2:1001)])
+#newton_logL <- as.matrix(read.csv(file = 'newton_logL.csv')[c(2:1001)])
+```
+
+
+
+```{r}
+## generate input - w
+true_rho <- rep( NA, K )
+for ( k in 1:K ){
+    true_rho[k] <- k / (K+1)
+}
+
+true_w <- rep( NA, K )
+true_w[1] <- pbeta(true_rho[2], shape1 = 4, shape2 = 2)
+for ( k in 2:(K-1) ){
+  true_w[k] <- pbeta(true_rho[k+1], shape1 = 4, shape2 = 2) - pbeta(true_rho[k], shape1 = 4, shape2 = 2)
+}
+true_w[K] <- 1 - pbeta(true_rho[K], shape1 = 4, shape2 = 2)
+print(sum(true_w))
+
+```
+
+
+
+```{r}
+## generate input - simulate X and Y
+simulate_Y <- function(){
+  x.pf <- matrix( rep( NA, n * K ), nrow = n )
+  Y <- rep( NA, n )
+  
+  for (k in 1:K){
+      x.pf[1,k] <- rnorm( 1, 0, my_sigma * sqrt(true_w[k]) )         # initialize x.pf[1,] ~ N( 0, my_sigma^2*w[k] )
+    }
+  
+  Y[1] <- mu + sum( x.pf[1, ] )
+  
+  for ( t in 1:(n-1) ){
+    for ( k in 1:K ){
+      x.pf[t+1, k] <- true_rho[k] * x.pf[t, k] + my_sigma * sqrt(1 - true_rho[k]^2) * sqrt(true_w[k]) * rnorm(1, 0, 1)
+    }
+    Y[t+1] <- mu + sum( x.pf[t+1, ] )
+  }
+  
+  return(Y)
+}
+
+```
+
+```{r}
+## generate input - simulate X and Y
+all_Y <- matrix( rep( 0, num_Y * n ), nrow = num_Y )
+for (i in 1:num_Y){
+  all_Y[i,] <- simulate_Y()
+}
+```
+
+
+```{r}
+## function for kalman filtering
+calculate_smoothing_w <- function(Y_value,w_value) {
+  Y <- Y_value
+  w <- w_value
+  
+  # dataframes to store Z, T, R, Q, and a, v, P, F, K_filtering
+  Z <- matrix( rep( 1, 1 * K ), nrow = 1 )
+  T <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    T[k,k] <- true_rho[k]
+  }
+  Q <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    Q[k,k] <- my_sigma^2 * (1-true_rho[k]^2) * (w[k])
+  }
+  R <- diag(1, K, K)
+  H <- 0
+  
+
+  a <- array(0, dim = c(K, 1, n))
+  v <- rep( NA, n )
+  P <- array(0, dim = c(K, K, n))
+  P[, , 1] <- matrix( rep( 0, K * K ), nrow = K )
+  for ( k in 1:K ){
+    P[k,k,1] <- my_sigma^2 * (w[k])
+  }
+  F <- rep( NA, n )
+  K_filtering <- array(NA, dim = c(K, 1, n))
+  partial <- rep( NA, n )
+  
+
+
+  # Kalman filtering
+  for (t in 1:(n-1)){
+    
+    v[t] <- Y[t]-Z %*% a[,,t]
+    F[t] <- Z %*% P[,,t] %*% t(Z) + H
+    K_filtering[, , t] <- (1/F[t]) * ( T %*% P[,,t] %*% t(Z) )
+    partial[t] <- log( (F[t]) )+(v[t])^2/F[t]
+    a[ , , t+1] <- T %*% a[ , , t] + v[t] * K_filtering[ , ,t]
+    P[ , , t+1] <- T %*% P[ , , t] %*% t( T-K_filtering[ , ,t]%*%Z ) + R %*% Q %*% t(R)
+
+    if (all.equal(target = P[ , , t+1], current = P[ , , t], tolerance = epsilon_filtering_equal) == TRUE){
+      
+      for (i in (t+1):(n-1)){
+        v[i] <- Y[i]-Z %*% a[,,i]
+        F[i] <- F[t]
+        K_filtering[, , i] <- K_filtering[, , t]
+        partial[i] <- log( (F[t]) )+(v[i])^2/F[t]
+        a[ , , i+1] <- T %*% a[ , , i] + v[i] * K_filtering[ , ,t]
+        P[ , , i+1] <- P[ , , t]
+      }
+      break
+    }
+
+  
+  }
+  v[n] <- Y[n]-Z %*% a[,,n]
+  F[n] <- Z %*% P[,,n] %*% t(Z) + H
+  K_filtering[, , n] <- (1/F[n]) * ( T %*% P[,,n] %*% t(Z) )
+  partial[n] <- log( (F[n]) )+(v[n])^2/F[n]
+  
+  loglikelihood <- -n/2*( log(2*pi) ) - 1/2 * sum( partial )
+  
+  
+  # Smoothing
+  L <- array(0, dim = c(K, K, n))
+  for (t in 1:n){
+    L[,,t] <- T - K_filtering[, , t] %*% Z
+  }
+
+  r <- array(0, dim = c(K, 1, n+1))
+  N <- array(0, dim = c(K, K, n+1))
+  for (j in 1:n ){
+    t = n-j+1
+    r[,,t] <- t(Z) * (1/F[t]) * v[t] + t(L[,,t]) %*% r[,,t+1]
+    N[,,t] <- (1/F[t]) * t(Z) %*% Z + t(L[,,t]) %*% N[,,t+1] %*% L[,,t]
+  }
+  E_eta <- array(0, dim = c(K, 1, n))
+  Var_eta <- array(0, dim = c(K, K, n))
+  for (t in 1:n){
+    E_eta[,,t] <- Q %*% t(R) %*% r[,,t+1]
+    Var_eta[,,t] <- Q - Q %*% t(R) %*% N[,,t+1] %*% R %*% Q
+  }
+  
+  temp_matrix <- (P[,,1]%*% r[,,1]) %*% t(P[,,1]%*% r[,,1]) + P[,,1] - P[,,1] %*% N[,,1]%*%P[,,1]
+  
+
+  return_list <- list("temp_matrix" = temp_matrix, "E_eta" = E_eta, "Var_eta" = Var_eta, "loglikelihood" = loglikelihood)
+  
+  return(return_list)
+  
+}
+
+```
+
+```{r}
+## function for calculating the score vector and hessian matrix
+calculate_w_q <- function(q_value) {
+  return(exp(q_value))
+}
+calculate_smoothing_q <- function(Y_value,q_value) {
+  w <- calculate_w_q(q_value)
+  calculate_smoothing_w(Y_value,w)
+}
+
+
+calculate_A <- function(temp_matrix,E_eta,Var_eta){
+  M <- matrix( rep( 0, K * K ), nrow = K )
+  for (j in 1:(n-1)){
+    M <- M + E_eta[,,j] %*% t(E_eta[,,j]) + Var_eta[,,j]
+  }
+
+  A <- matrix( rep( 0, K * 1 ), nrow = K )
+  for (j in 1:K){
+    A[j,1] <- temp_matrix[j,j]/( my_sigma^2) + M[j,j] / ( my_sigma^2 * (1 - true_rho[j]^2) )
+  }
+  
+  return(A)
+}
+
+calculate_score_q <- function (Y_value,q_value){
+
+  smoothing <- calculate_smoothing_q(Y_value,q_value)
+  A <- calculate_A(smoothing$temp_matrix,smoothing$E_eta,smoothing$Var_eta)
+  return (as.matrix(-1/2 * ( n - A/(exp(q_value) ) )))
+}
+
+calculate_second_q <- function (Y_value,q_value){
+  q <- q_value
+  temp <- matrix( rep( 0, K * K ), nrow = K )
+  for (i in 1:K){
+    print(i)
+    unit_vec <- matrix( rep( 0, K * 1 ), nrow = K )
+    unit_vec[i,1] <- epsilon_second_calculate
+    temp[ , i] <- (calculate_score(Y_value,q+unit_vec) - calculate_score(Y_value,q-unit_vec))/(2*epsilon_second_calculate)
+  }
+  return(temp)
+}
+
+calculate_score_w <- function (Y_value,w_value){
+
+  smoothing <- calculate_smoothing_q(Y_value,log(w_value))
+  A <- calculate_A(smoothing$temp_matrix,smoothing$E_eta,smoothing$Var_eta)
+  return (as.matrix(-1/2 * ( n/(w_value) - A/((w_value)^2 ) )))
+}
+
+calculate_second_w <- function (Y_value,w_value){
+  w <- w_value
+  temp <- matrix( rep( 0, K * K ), nrow = K )
+  for (i in 1:K){
+    print(i)
+    unit_vec <- matrix( rep( 0, K * 1 ), nrow = K )
+    unit_vec[i,1] <- epsilon_second_calculate
+    temp[ , i] <- (calculate_score_w(Y_value,w+unit_vec) - calculate_score_w(Y_value,w-unit_vec))/(2*epsilon_second_calculate)
+  }
+  return(temp)
+}
+
+
+## function for calculating lambda in the em algorithm
+lambda_zero <- function(lamb, A){
+  return(2* lamb + sum(  sqrt(n^2-4*lamb*A )   ) -K*n   )
+}
+lambda_first <- function(lamb, A){
+  return(  2-2*sum(A/sqrt(n^2-4*lamb*A))   )
+}
+get_lambda <- function(A){
+  lamb <- K*n-K^2*mean(A)
+  for (i in 1:20){
+
+    zero <- lambda_zero(lamb, A)
+    if (abs(zero) < 1e-10  ){
+      return(lamb)
+    }
+    lamb <- lamb - zero / lambda_first(lamb, A)
+  }
+  return(lamb)
+}
+
+get_w_lambda <- function(A){
+  lamb <- get_lambda(A)
+  return(( n-sqrt(n^2-4*lamb*A) )/(2*lamb))
+}
+
+
+```
+
+
+```{r}
+## initilization for newton algorithm
+all_w_newton <- matrix( rep( 0, num_Y * K ), nrow = num_Y )
+all_q_newton <- matrix( rep( log(1/K), num_Y * K ), nrow = num_Y )    # q is defined to be log(w)
+all_logL_newton <- matrix( rep( 0, num_Y * num_iteration_max ), nrow = num_Y )
+```
+
+```{r}
+## newton algorithm
+get_newton_eq <- function(Y_value,w_value){
+  w <- w_value
+  second_more <- matrix( rep( 0, (K+1) * (K+1) ), nrow = (K+1))
+  score_more <- matrix( rep( 0, (K+1) * 1 ), nrow = (K+1))
+  
+  for (i in 1:20){
+    print(i)
+    all_logL_newton[1,i] <<- calculate_smoothing_q(all_Y[1,],log(w))$loglikelihood
+    print(all_logL_newton[1,i])
+    
+    score_more[c(1:K), 1] <- calculate_score_w(Y_value,w)
+    print(score_more)
+    
+    second_more[c(1:K), (K+1)] <- rep(1,K)
+    second_more[(K+1), c(1:K)] <- rep(1,K)
+    second_more[c(1:K), c(1:K)] <- -calculate_second_w(Y_value,w)
+    print(second_more)
+    
+    
+    vector_more <- inv(second_more) %*% score_more
+    w <- w + vector_more[c(1:K), 1]
+    
+    
+    print(w)
+    print("sum")
+    print(sum(w))
+  }
+  all_q_newton[1,]<<- w
+}
+get_newton_eq(all_Y[1,], exp(all_q_newton[1,]) )
+```
+
+
+
+```{r}
+## initilization for em algorithm
+all_w_pure <- matrix( rep( 0, num_Y * K ), nrow = num_Y )
+all_q_pure  <- matrix( rep( log(1/K), num_Y * K ), nrow = num_Y )
+all_logL_pure  <- matrix( rep( 0, num_Y * num_iteration_max ), nrow = num_Y )
+```
+
+```{r}
+## em algorithm
+begin_num_pure <- 1
+end_num_pure <- 1000
+w_path_pure <-  matrix( rep( 1/K, end_num_pure * K ), nrow = end_num_pure)
+calculate_EM_q_pure <- function(j,begin_num_pure,end_num_pure){
+
+  logL_pure <- rep(0,end_num_pure)
+  for (t in begin_num_pure:end_num_pure){
+    print(t)
+
+    q <- all_q_pure [j,]
+
+
+    smoothing <- calculate_smoothing_q(all_Y[j,],q)
+    all_logL_pure[j,t] <<- smoothing$loglikelihood
+    print("log")
+    print(j)
+    print(all_logL_pure[j,t])
+    A <- calculate_A(smoothing$temp_matrix,smoothing$E_eta,smoothing$Var_eta)
+    print(A)
+    print("score")
+    print(as.matrix(-1/2 * ( n - A/(exp(q) ) )))
+    w_path_pure[t,] <<- get_w_lambda(A)
+    print(w_path_pure[t,])
+    print("sum")
+    print(sum(w_path_pure[t,]))
+    all_q_pure[j,] <<- as.matrix(log(w_path_pure[t,]))
+  }
+}
+
+for (j in 1:1){
+  print(j)
+  calculate_EM_q_pure(j,begin_num_pure,end_num_pure)
+}
+
+```
+
